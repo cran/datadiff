@@ -24,7 +24,7 @@
 #' @param date_equal_mode Default comparison mode for date columns
 #' @param datetime_equal_mode Default comparison mode for datetime columns
 #' @param logical_equal_mode Default comparison mode for logical columns
-#' @return The path to the created YAML file, invisibly.
+#' @return The \code{path} to the written YAML file, returned invisibly.
 #' @importFrom yaml write_yaml
 #' @importFrom stats setNames
 #' @importFrom dplyr collect
@@ -43,8 +43,9 @@ write_rules_template <- function(data_reference,
                                  datetime_equal_mode = "exact",
                                  logical_equal_mode = "exact") {
 
-  # 0-row collect to retrieve column names and types without loading data:
-  # works for both local data.frames and lazy tables (tbl_lazy).
+  # Validate key if provided
+  # Use a 0-row collect to retrieve column names and types: works for both local
+  # data.frames and lazy tables (tbl_lazy) without loading all rows.
   .ref_schema    <- dplyr::collect(utils::head(data_reference, 0L))
   .ref_col_names <- names(.ref_schema)
 
@@ -61,7 +62,7 @@ write_rules_template <- function(data_reference,
       )
     }
   }
-  if (is.null(label) || label == "") {label <- paste("comparison", deparse1(substitute(data_reference)))
+  if (is.null(label) || label == "") {label <- paste("comparaison", deparse1(substitute(data_reference)))
 
   }
   types <- detect_column_types(.ref_schema)
@@ -127,15 +128,15 @@ read_rules <- function(path) {
 #' @param label Descriptive label for the validation report
 #' @param error_msg_no_key Error message when datasets have different row counts without keys
 #' @param lang Language code for pointblank reports. Defaults to the
-#'   \code{datadiff.lang} option if set, otherwise \code{"en"}. Set globally
-#'   with \code{options(datadiff.lang = "fr")}. Supported values include
+#'   \code{datadiff.lang} option if set, otherwise \code{"fr"}. Override globally
+#'   with \code{options(datadiff.lang = "en")}. Supported values include
 #'   "en" (English), "fr" (French), "de" (German), "it" (Italian), "es" (Spanish),
 #'   "pt" (Portuguese), "zh" (Chinese), "ja" (Japanese), "ru" (Russian), etc.
 #'   See pointblank documentation for full list.
 #' @param locale Locale code for number and date formatting. Defaults to the
-#'   \code{datadiff.locale} option if set, otherwise \code{"en_US"}. Set globally
-#'   with \code{options(datadiff.locale = "fr_FR")}. Examples: "en_GB", "fr_FR",
-#'   "de_DE", "es_ES", "pt_BR", "zh_CN", "ja_JP".
+#'   \code{datadiff.locale} option if set, otherwise \code{"fr_FR"}. Override
+#'   globally with \code{options(datadiff.locale = "en_US")}. Examples: "en_US",
+#'   "en_GB", "de_DE", "es_ES", "pt_BR", "zh_CN", "ja_JP".
 #' @param extract_failed Logical indicating whether to collect rows that failed validation
 #'   (default: TRUE). Set to FALSE to reduce memory usage for large datasets with many errors.
 #' @param get_first_n Integer specifying the maximum number of failed rows to extract per
@@ -155,10 +156,19 @@ read_rules <- function(path) {
 #'   `data.frame`s or `tbl_lazy` objects.
 #' @return A list containing:
 #'   \item{agent}{Configured pointblank agent with validation results}
-#'   \item{reponse}{Interrogation results from pointblank}
+#'   \item{reponse}{Interrogated pointblank agent (class \code{datadiff_report}):
+#'     usable by \code{pointblank::all_passed()} / \code{get_data_extracts()};
+#'     printing it lazily renders a full pointblank-style report from
+#'     \code{coverage} (built on demand, memoized).}
 #'   \item{missing_in_candidate}{Columns missing in candidate data}
 #'   \item{extra_in_candidate}{Extra columns in candidate data}
 #'   \item{applied_rules}{Final column-specific rules applied}
+#'   \item{coverage}{A \code{datadiff_coverage} data.frame: one row per check
+#'     actually performed (column, check type, n, n_failed, status), always
+#'     produced at negligible cost so the verified checks stay visible even when
+#'     the fast path skips the per-column agent.}
+#'   \item{summary}{Aggregate counts from \code{coverage} (n_checks, n_pass,
+#'     n_fail, n_rows_failed_total, all_passed).}
 #' @importFrom dplyr arrange across left_join %>%
 #' @importFrom pointblank interrogate
 #' @importFrom dplyr collect
@@ -187,8 +197,8 @@ compare_datasets_from_yaml <- function(data_reference,
                                        ref_suffix = "__reference",
                                        label = NULL,
                                        error_msg_no_key = "Without keys, both tables must have the same number of rows.",
-                                       lang = getOption("datadiff.lang", "en"),
-                                       locale = getOption("datadiff.locale", "en_US"),
+                                       lang = getOption("datadiff.lang", "fr"),
+                                       locale = getOption("datadiff.locale", "fr_FR"),
                                        extract_failed = TRUE,
                                        get_first_n = NULL,
                                        sample_n = NULL,
@@ -235,7 +245,7 @@ compare_datasets_from_yaml <- function(data_reference,
   #
   # With arrow::to_duckdb(), Arrow allocates read buffers OUTSIDE DuckDB's
   # memory manager.  Combined Arrow + DuckDB memory can exceed physical RAM
-  # before DuckDB's spilling threshold is reached → OOM.  Native read_parquet()
+  # before DuckDB's spilling threshold is reached -> OOM.  Native read_parquet()
   # eliminates this external allocation.
   if (is_arrow(data_reference) || is_arrow(data_candidate)) {
     fresh_con <- duckdb::dbConnect(duckdb::duckdb())
@@ -303,55 +313,31 @@ compare_datasets_from_yaml <- function(data_reference,
 
   # Check for duplicate keys (only if key exists in both datasets)
   if (!is.null(key) && all(key %in% get_col_names(data_reference)) && all(key %in% get_col_names(data_candidate))) {
-    # Use SQL-native GROUP BY + COUNT to find duplicate key values (works for both
-    # local data.frames and lazy tables without bracket-subsetting).
-    ref_dups <- data_reference %>%
-      dplyr::count(dplyr::across(dplyr::all_of(key))) %>%
-      dplyr::filter(n > 1L) %>%
-      dplyr::collect()
+    # Detect duplicate key values. Local data.frames use a fast
+    # anyDuplicated()/duplicated() pass; lazy tables keep the SQL-native count.
+    ref_dup_info  <- find_duplicate_keys(data_reference, key)
+    cand_dup_info <- find_duplicate_keys(data_candidate, key)
 
-    cand_dups <- data_candidate %>%
-      dplyr::count(dplyr::across(dplyr::all_of(key))) %>%
-      dplyr::filter(n > 1L) %>%
-      dplyr::collect()
-
-    ref_has_dups <- nrow(ref_dups) > 0
-    cand_has_dups <- nrow(cand_dups) > 0
+    ref_has_dups  <- !is.null(ref_dup_info)
+    cand_has_dups <- !is.null(cand_dup_info)
 
     if (ref_has_dups || cand_has_dups) {
+      # Build detailed warning message
       warning_parts <- c()
 
       if (ref_has_dups) {
-        n_dup_keys_ref <- nrow(ref_dups)
-        n_dup_rows_ref <- sum(ref_dups$n)
-        key_cols_ref <- ref_dups[, key, drop = FALSE]
-
-        examples_ref <- if (n_dup_keys_ref <= 3) {
-          apply(key_cols_ref, 1, function(r) paste(key, "=", r, collapse = ", "))
-        } else {
-          c(apply(key_cols_ref[1:3, , drop = FALSE], 1, function(r) paste(key, "=", r, collapse = ", ")), "...")
-        }
-
         warning_parts <- c(warning_parts, sprintf(
           "data_reference: %d duplicate key value(s) affecting %d rows (examples: %s)",
-          n_dup_keys_ref, n_dup_rows_ref, paste(examples_ref, collapse = "; ")
+          ref_dup_info$n_dup_keys, ref_dup_info$n_dup_rows,
+          paste(ref_dup_info$examples, collapse = "; ")
         ))
       }
 
       if (cand_has_dups) {
-        n_dup_keys_cand <- nrow(cand_dups)
-        n_dup_rows_cand <- sum(cand_dups$n)
-        key_cols_cand <- cand_dups[, key, drop = FALSE]
-
-        examples_cand <- if (n_dup_keys_cand <= 3) {
-          apply(key_cols_cand, 1, function(r) paste(key, "=", r, collapse = ", "))
-        } else {
-          c(apply(key_cols_cand[1:3, , drop = FALSE], 1, function(r) paste(key, "=", r, collapse = ", ")), "...")
-        }
-
         warning_parts <- c(warning_parts, sprintf(
           "data_candidate: %d duplicate key value(s) affecting %d rows (examples: %s)",
-          n_dup_keys_cand, n_dup_rows_cand, paste(examples_cand, collapse = "; ")
+          cand_dup_info$n_dup_keys, cand_dup_info$n_dup_rows,
+          paste(cand_dup_info$examples, collapse = "; ")
         ))
       }
 
@@ -369,6 +355,7 @@ compare_datasets_from_yaml <- function(data_reference,
     }
   }
 
+  # Analyze columns
   col_analysis <- analyze_columns(data_reference, data_candidate, ignore_columns = ignore_columns)
   cols_reference <- col_analysis$cols_reference
   cols_candidate <- col_analysis$cols_candidate
@@ -412,6 +399,7 @@ compare_datasets_from_yaml <- function(data_reference,
   data_reference_p <- preprocess_dataframe(data_reference, col_rules, schema = schema_ref)
   data_candidate_p <- preprocess_dataframe(data_candidate, col_rules, schema = schema_cand)
 
+  # Get row validation information
   row_validation_info <- validate_row_counts(data_reference_p, data_candidate_p, rules)
 
   if (!is.null(key)) {
@@ -460,49 +448,41 @@ compare_datasets_from_yaml <- function(data_reference,
   }, FUN.VALUE = logical(1))]
   tol_cols <- setdiff(tol_cols, type_mismatch_cols)
 
-  cmp <- add_tolerance_columns(cmp, tol_cols, col_rules, ref_suffix, na_equal)
+  # Equality columns the verdict actually checks: common, non-key, non-tolerance
+  # AND non-type-mismatched. Derived once and threaded to both the __eq producer
+  # and the verdict consumer so the two sets cannot drift. Type-mismatched
+  # columns are excluded here because the equality SQL would compare incompatible
+  # types and crash the lazy path (e.g. casting a character candidate to the
+  # numeric reference's type); they are reported as failing validation steps
+  # instead.
+  eq_cols <- setdiff(setdiff(common_cols, type_mismatch_cols), tol_cols)
 
-  # For lazy tables, pre-compute equality columns for non-tolerance columns.
-  # pointblank's col_vals_equal(value = cmp[[col]]) cannot access SQL columns via [[,
-  # so we compute c__eq as a boolean SQL column and validate that against TRUE.
-  # All columns are batched into a single mutate() to prevent O(n) nested
-  # lazy_query nodes that would exceed R's expression evaluation stack limit.
-  if (is_non_local(cmp)) {
-    eq_cols_lazy <- setdiff(common_cols, tol_cols)
-    exprs_eq <- list()
-    for (c in eq_cols_lazy) {
-      c_sym     <- dplyr::sym(c)
-      rc_sym    <- dplyr::sym(paste0(c, ref_suffix))
-      eq_col_nm <- paste0(c, "__eq")
-      if (na_equal) {
-        exprs_eq[[eq_col_nm]] <- rlang::expr(dplyr::case_when(
-          is.na(!!c_sym) & is.na(!!rc_sym) ~ TRUE,
-          is.na(!!c_sym) | is.na(!!rc_sym) ~ FALSE,
-          !!c_sym == !!rc_sym              ~ TRUE,
-          .default = FALSE
-        ))
-      } else {
-        exprs_eq[[eq_col_nm]] <- rlang::expr(dplyr::case_when(
-          is.na(!!c_sym) | is.na(!!rc_sym) ~ FALSE,
-          !!c_sym == !!rc_sym              ~ TRUE,
-          .default = FALSE
-        ))
-      }
-    }
-    if (length(exprs_eq) > 0) {
-      cmp <- dplyr::mutate(cmp, !!!exprs_eq)
-    }
+  # Add the per-column within-tolerance (__ok) and, on the lazy path, equality
+  # (__eq) booleans - the only columns that drive the verdict.
+  #  - Local: materialise only __ok via a vectorised fast path (__eq is
+  #    recomputed on the fly where needed).
+  #  - Lazy: build __ok AND __eq in a SINGLE templated SQL SELECT. Doing this
+  #    with per-column dplyr::mutate() is O(columns) on the R side (dbplyr query
+  #    construction + SQL rendering), the dominant cost on wide tables; the
+  #    templated SQL is O(1) dbplyr work and lets the database do the rest.
+  cmp <- if (is_non_local(cmp)) {
+    add_bool_cols_sql(cmp, tol_cols, eq_cols,
+                      col_rules, ref_suffix, na_equal)
+  } else {
+    add_ok_columns(cmp, tol_cols, col_rules, ref_suffix, na_equal)
   }
 
   # Add row count validation column if needed
+  row_count_ok <- TRUE
   if (row_validation_info$check_count) {
+    # Calculate if row count validation passes
     expected <- row_validation_info$expected_count
     if (!is.null(expected)) {
       row_count_ok <- abs(row_validation_info$cand_count - expected) <= row_validation_info$tolerance
     } else {
       row_count_ok <- abs(row_validation_info$cand_count - row_validation_info$ref_count) <= row_validation_info$tolerance
     }
-    # Add row_count_ok column via mutate — works for both local and lazy tables,
+    # Add row_count_ok column via mutate - works for both local and lazy tables,
     # and handles empty dataframes correctly (no nrow() guard needed).
     cmp <- dplyr::mutate(cmp, row_count_ok = !!row_count_ok)
   }
@@ -516,44 +496,85 @@ compare_datasets_from_yaml <- function(data_reference,
   is_lazy <- is_non_local(cmp)
   cmp_for_agent <- cmp
   if (is_lazy) {
-    eq_cols_lazy <- setdiff(common_cols, tol_cols)
     val_cols <- c(
       paste0(tol_cols, "__ok"),
-      paste0(eq_cols_lazy, "__eq"),
+      paste0(eq_cols, "__eq"),
       if (isTRUE(row_validation_info$check_count)) "row_count_ok" else character(0)
     )
     cmp_slim      <- dplyr::select(cmp, dplyr::any_of(val_cols))
     tmp_tbl_name  <- paste0("datadiff_", gsub("[^0-9]", "", format(Sys.time(), "%H%M%OS3")))
-    # compute() sends CREATE TEMP TABLE AS SELECT … to DuckDB: all computation
+    # compute() sends CREATE TEMP TABLE AS SELECT ... to DuckDB: all computation
     # (join, boolean expressions) happens inside DuckDB's process, with disk
     # spilling available for the large join.  We then collect() the slim boolean
-    # result into R so that pointblank receives a plain data.frame — avoiding
+    # result into R so that pointblank receives a plain data.frame - avoiding
     # DuckDB connection-state issues (is_tbl_mssql crash) during interrogation.
     cmp_slim_computed <- dplyr::compute(cmp_slim, name = tmp_tbl_name, temporary = TRUE)
     cmp_for_agent     <- dplyr::collect(cmp_slim_computed)
   }
 
-  # Configure pointblank agent.
-  # Type-mismatched columns are excluded from common_cols (they must not go
-  # through equality comparison, which could silently pass due to R coercion)
-  # and handled via the dedicated type_mismatch_cols failing steps.
-  agent <- setup_pointblank_agent(
-    cmp_for_agent,
-    cols_reference,
-    setdiff(common_cols, type_mismatch_cols),
-    tol_cols,
-    row_validation_info,
-    ref_suffix,
-    warn_at,
-    stop_at,
-    label,
-    na_equal,
-    lang,
-    locale,
+  # Fast all-pass short-circuit.
+  # The verdict is fully determined by the boolean validation columns already
+  # computed above (plus the structural checks). When everything passes there
+  # are no cells to extract, so the expensive per-column pointblank agent (one
+  # step per column, ~quadratic on wide tables) can be replaced by a constant
+  # cost trivially-passing agent. all_passed stays identical and
+  # get_data_extracts() is empty either way. Any failure falls through to the
+  # full per-column agent so failing cells remain extractable byte-for-byte.
+  all_passed_fast <-
+    length(missing_in_candidate) == 0 &&
+    length(type_mismatch_cols) == 0 &&
+    isTRUE(row_count_ok) &&
+    all_validations_pass(
+      tbl = cmp_for_agent, tol_cols = tol_cols, eq_cols = eq_cols,
+      ref_suffix = ref_suffix, na_equal = na_equal
+    )
+
+  # Faithful, O(columns) record of every check performed, built from the same
+  # booleans the verdict is derived from. Always produced (green and red) so the
+  # caller can see what was verified even when the fast path skips the per-column
+  # pointblank agent.
+  coverage <- build_coverage(
+    tbl = cmp_for_agent, tol_cols = tol_cols, eq_cols = eq_cols,
     missing_in_candidate = missing_in_candidate,
     type_mismatch_cols = type_mismatch_cols,
-    add_col_exists_steps = !is_lazy
+    row_validation_info = row_validation_info, row_count_ok = row_count_ok,
+    ref_suffix = ref_suffix, na_equal = na_equal
   )
+
+  if (all_passed_fast) {
+    agent <- build_pass_agent(
+      tbl = cmp_for_agent, label = label,
+      warn_at = warn_at, stop_at = stop_at, lang = lang, locale = locale
+    )
+  } else {
+    # Failure path: build pointblank steps only for the columns that actually
+    # fail. Columns that pass produce empty data extracts, so omitting their
+    # steps leaves get_data_extracts() byte-for-byte unchanged while avoiding
+    # the per-column agent overhead on the passing majority. col_exists steps
+    # (which only ever pass) are dropped for the same reason. Structural
+    # failures (missing columns, type mismatches, row count) are always kept.
+    fail <- failing_columns(
+      tbl = cmp_for_agent, tol_cols = tol_cols, eq_cols = eq_cols,
+      ref_suffix = ref_suffix, na_equal = na_equal
+    )
+    agent <- setup_pointblank_agent(
+      cmp_for_agent,
+      cols_reference,
+      fail$eq,
+      fail$tol,
+      row_validation_info,
+      ref_suffix,
+      warn_at,
+      stop_at,
+      label,
+      na_equal,
+      lang,
+      locale,
+      missing_in_candidate = missing_in_candidate,
+      type_mismatch_cols = type_mismatch_cols,
+      add_col_exists_steps = FALSE
+    )
+  }
 
   reponse <- interrogate(
     agent,
@@ -564,12 +585,24 @@ compare_datasets_from_yaml <- function(data_reference,
     sample_limit = sample_limit
   )
 
+  all_passed <- pointblank::all_passed(reponse)
+
+  # Make reponse render the full pointblank report lazily (on print) from the
+  # coverage, while remaining a real interrogated agent for all_passed() and
+  # get_data_extracts().
+  reponse <- as_datadiff_report(
+    reponse, coverage = coverage, label = label, lang = lang, locale = locale,
+    warn_at = warn_at, stop_at = stop_at
+  )
+
   list(
-    all_passed = pointblank::all_passed(reponse),
+    all_passed = all_passed,
     agent = agent,
     reponse = reponse,
     missing_in_candidate = missing_in_candidate,
     extra_in_candidate = extra_in_candidate,
-    applied_rules = col_rules
+    applied_rules = col_rules,
+    coverage = coverage,
+    summary = summarize_coverage(coverage)
   )
 }

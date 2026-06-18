@@ -40,6 +40,19 @@ result$all_passed
 ## ----return-structure---------------------------------------------------------
 names(result)
 
+## ----coverage-----------------------------------------------------------------
+result$coverage
+
+## ----coverage-summary---------------------------------------------------------
+result$summary
+
+## ----coverage-fails, eval = FALSE---------------------------------------------
+# result$coverage[result$coverage$status == "FAIL", ]
+
+## ----print-report, eval = FALSE-----------------------------------------------
+# print(result$reponse)                              # renders the report on demand
+# datadiff_report_html(result, file = "report.html") # ...or save it to a file
+
 ## ----applied-rules------------------------------------------------------------
 result$applied_rules$revenue
 result$applied_rules$category
@@ -72,7 +85,7 @@ failed_rows
 # result <- compare_datasets_from_yaml(ref, cand, key = "id",
 #                                      sample_frac = 0.1, sample_limit = 500)
 # 
-# # Disable extraction entirely (fastest — only pass/fail counts are kept)
+# # Disable extraction entirely (fastest - only pass/fail counts are kept)
 # result <- compare_datasets_from_yaml(ref, cand, key = "id",
 #                                      extract_failed = FALSE)
 
@@ -80,7 +93,7 @@ failed_rows
 ref_quick  <- data.frame(id = 1:3, x = c(1.0, 2.0, 3.0), label = c("A", "B", "C"))
 cand_quick <- data.frame(id = 1:3, x = c(1.0, 2.0, 3.0), label = c("A", "B", "C"))
 
-# No path needed — rules are generated on the fly
+# No path needed - rules are generated on the fly
 result_quick <- compare_datasets_from_yaml(ref_quick, cand_quick, key = "id")
 result_quick$all_passed
 
@@ -127,7 +140,7 @@ write_rules_template(
 # Read, patch by_name, write back
 rules_obj <- read_rules(rules_full)
 
-rules_obj$by_name$price       <- list(abs = 0.01)           # ±0.01 for price
+rules_obj$by_name$price       <- list(abs = 0.01)           # +/-0.01 for price
 rules_obj$by_name$description <- list(case_insensitive = TRUE, trim = TRUE)
 
 yaml::write_yaml(rules_obj, rules_full)
@@ -158,7 +171,7 @@ rules_rel <- tempfile(fileext = ".yaml")
 write_rules_template(ref_num, key = "id", path = rules_rel,
                      numeric_abs = 0, numeric_rel = 0.01)
 
-# ref = 1000, diff = 9, threshold = 0.01 × 1000 = 10 → PASS
+# ref = 1000, diff = 9, threshold = 0.01 * 1000 = 10 -> PASS
 cand_pct <- data.frame(id = 1:3, price = c(1.009, 1009.0, 1e6 * 1.009))
 compare_datasets_from_yaml(ref_num, cand_pct, key = "id", path = rules_rel)$all_passed
 
@@ -187,7 +200,7 @@ write_rules_template(ref_txt, key = "id", path = rules_strict)
 compare_datasets_from_yaml(ref_txt, cand_txt, key = "id",
                            path = rules_strict)$all_passed
 
-# Relaxed: case + trim — only row 4 ("Baz" vs "Bar") fails
+# Relaxed: case + trim - only row 4 ("Baz" vs "Bar") fails
 rules_relax <- tempfile(fileext = ".yaml")
 write_rules_template(ref_txt, key = "id", path = rules_relax,
                      character_case_insensitive = TRUE,
@@ -197,8 +210,8 @@ compare_datasets_from_yaml(ref_txt, cand_txt, key = "id",
 
 ## ----row-validation-----------------------------------------------------------
 ref_rows  <- data.frame(id = 1:5, value = 1:5)
-cand_ok   <- data.frame(id = 1:5, value = 1:5)   # 5 rows — exact match
-cand_more <- data.frame(id = 1:7, value = 1:7)   # 7 rows — 2 extra
+cand_ok   <- data.frame(id = 1:5, value = 1:5)   # 5 rows - exact match
+cand_more <- data.frame(id = 1:7, value = 1:7)   # 7 rows - 2 extra
 
 rules_count <- tempfile(fileext = ".yaml")
 write_rules_template(ref_rows, key = "id", path = rules_count,
@@ -216,9 +229,11 @@ rules_tol <- tempfile(fileext = ".yaml")
 write_rules_template(ref_rows, key = "id", path = rules_tol,
                      check_count_default         = TRUE,
                      expected_count_default      = 5,
-                     row_count_tolerance_default = 3)  # accept 5 ± 3
+                     row_count_tolerance_default = 3)  # accept 5 +/- 3
 
-# 7 rows: |7 - 5| = 2 ≤ 3 → PASS
+# row_count check PASSES: |7 - 5| = 2 is within tolerance 3.
+# all_passed is still FALSE here: the 2 extra keyed rows (id 6, 7) have
+# no reference counterpart and fail the per-column value comparison.
 compare_datasets_from_yaml(ref_rows, cand_more, key = "id",
                            path = rules_tol)$all_passed
 
@@ -226,14 +241,14 @@ compare_datasets_from_yaml(ref_rows, cand_more, key = "id",
 ref_na  <- data.frame(id = 1:3, value = c(1.0, NA, 3.0))
 cand_na <- data.frame(id = 1:3, value = c(1.0, NA, 3.0))  # identical NAs
 
-# na_equal: yes (default) — NA == NA passes
+# na_equal: yes (default) - NA == NA passes
 rules_na_yes <- tempfile(fileext = ".yaml")
 write_rules_template(ref_na, key = "id", path = rules_na_yes,
                      na_equal_default = TRUE)
 compare_datasets_from_yaml(ref_na, cand_na, key = "id",
                            path = rules_na_yes)$all_passed
 
-# na_equal: no — NA == NA fails
+# na_equal: no - NA == NA fails
 rules_na_no <- tempfile(fileext = ".yaml")
 write_rules_template(ref_na, key = "id", path = rules_na_no,
                      na_equal_default = FALSE)

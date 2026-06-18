@@ -1,3 +1,108 @@
+# datadiff 0.5.0
+
+* Release consolidating the 0.4.x maintenance series (wide-table performance,
+  lazy / Arrow / Parquet support, accurate HTML reports and IEEE 754 tolerance
+  handling). No user-facing behaviour changes since 0.4.9; see the entries
+  below for the details.
+
+# datadiff 0.4.9
+
+## Bug fixes
+
+* The HTML report of an **all-pass** comparison again shows the per-check
+  evaluated row counts (the TBL / EVAL / UNITS / PASS columns). The all-pass
+  fast path built a report agent that {pointblank} did not consider interrogated,
+  so `get_agent_report()` rendered a bare "no interrogation performed" plan with
+  those columns blank, on both the in-memory and the lazy paths. The synthetic
+  report agent is now marked as interrogated in constant time (without re-running
+  the per-column interrogation) and its validation set is built by replicating a
+  single template step, so the report is correct and `build_report_agent()` stays
+  fast on wide tables (~0.04 s for 1448 columns). `coverage` / `summary` were
+  already correct (issue #6).
+
+# datadiff 0.4.8
+
+## Performance
+
+* `compare_datasets_from_yaml()` is much faster on **wide** tables, including
+  all-pass (green) comparisons - the nominal case of non-regression suites.
+  Measured on 300 numeric columns x 200 000 identical rows: the in-memory
+  (data.frame) path drops from ~13.8 s to ~5.2 s, and the lazy (DuckDB) path
+  from ~64.5 s to ~9.8 s. The verdict (`all_passed`) and the extractable failing
+  cells are unchanged. Three levers (issue #4):
+  - **Duplicate-key check** on local data.frames now uses `anyDuplicated()` /
+    `duplicated()` (a single hashed pass) instead of `dplyr::count()` /
+    `group_by()`; lazy tables keep the SQL-native count. Same warning message.
+  - **Tolerance arithmetic** on the local path computes only the `<col>__ok`
+    booleans, with a fast path that skips the special-value handling when a
+    column has no `NA`/`NaN`/`Inf`.
+  - **Lazy path** builds the `<col>__ok` / `<col>__eq` booleans in a single
+    templated SQL `SELECT` instead of one `dplyr::mutate()` expression per
+    column, eliminating the dbplyr query-construction cost that dominated wide
+    lazy comparisons (verified equivalent on DuckDB and SQLite).
+
+# datadiff 0.4.7
+
+## Bug fixes
+
+* The lazy HTML report now keeps the genuine failure detail. Printing
+  `result$reponse` (or calling `datadiff_report_html()`) on a failing
+  comparison again shows, for each failing column, the number of failing rows,
+  the offending cells, and the downloadable CSV extract - while still listing
+  every check performed, with the `col_exists` existence checks and the
+  `col_vals_equal` value checks presented as distinct steps. The report is now
+  built on top of the real interrogated agent (which holds the extracts) rather
+  than a counts-only synthesis, so nothing is lost.
+
+* `build_report_agent()` threads `warn_at` / `stop_at` so the report's
+  warn/stop colouring follows the supplied thresholds instead of hard-coded
+  values.
+
+## Documentation
+
+* Vignette and README document `coverage` / `summary` and the lazy report, and
+  are normalised to ASCII.
+* DESCRIPTION quotes software names ('pointblank', 'YAML') per CRAN convention,
+  clearing the "Possibly misspelled words" NOTE.
+* Internal helpers are marked `@noRd` (documentation kept in source, no `.Rd`).
+
+# datadiff 0.4.6
+
+## New features
+
+* `compare_datasets_from_yaml()` now returns `coverage` and `summary`. The
+  `coverage` data.frame is a faithful, instantly computed record of every check
+  performed (one row per column with its check type, number of rows, number of
+  failures and PASS/FAIL status); `summary` holds the aggregate counts. This
+  keeps the verified checks visible even when the all-pass fast path skips the
+  per-column {pointblank} agent, so an all-green run no longer looks empty.
+
+* Printing `result$reponse` now lazily renders a full {pointblank}-style report.
+  `result$reponse` stays a real interrogated agent (so `pointblank::all_passed()`
+  and `pointblank::get_data_extracts()` keep working), but printing it builds the
+  per-column report on demand from the pre-computed counts (no re-interrogation)
+  and memoizes the result, so the rendering cost is paid only when the report is
+  actually displayed.
+
+* New exported `datadiff_report_html()` writes that {pointblank}-style report to
+  a standalone HTML file.
+
+# datadiff 0.4.5
+
+## Performance
+
+* `compare_datasets_from_yaml()` is dramatically faster on wide tables. The
+  verdict is computed in a single vectorised pass over the precomputed
+  comparison booleans; when everything passes, the expensive per-column
+  {pointblank} agent (one validation step per column, roughly quadratic in the
+  number of columns) is skipped entirely. On a failing comparison, validation
+  steps are built only for the columns that actually fail. `all_passed` and the
+  extracted failing cells are unchanged.
+
+* `add_tolerance_columns()`: the per-column tolerance computation was rewritten
+  to avoid quadratic data.frame growth (the result columns are bound in a single
+  operation instead of one assignment per column), with no change to the verdict.
+
 # datadiff 0.4.4
 
 ## CRAN submission preparation
@@ -36,7 +141,7 @@
   `cand - ref` can exceed the threshold by a few ULPs (e.g.
   `100.01 - 100.00 = 0.0100000000000051 > 0.01` in double precision),
   causing a false validation failure. Fixed by adding a correction of
-  `8 * .Machine$double.eps * |ref|` to the threshold before comparing — a
+  `8 * .Machine$double.eps * |ref|` to the threshold before comparing - a
   value proportional to the operand magnitude that absorbs floating-point
   representation error without meaningfully widening the user-specified
   tolerance. The correction is applied in both the local data.frame path
@@ -100,7 +205,7 @@
     metadata of the lazy table and received `character(0)`, which propagated to
     `if(logical(0))`. Fixed by `collect()`-ing the slim boolean table (~125
     logical columns) after `compute()` so that pointblank receives a plain
-    `data.frame` — no live DuckDB connection required during interrogation.
+    `data.frame` - no live DuckDB connection required during interrogation.
 
 ## New parameters
 
@@ -121,7 +226,7 @@
   Key design decisions:
   - Arrow objects are converted to DuckDB-backed lazy tables via
     `arrow::to_duckdb()` before pointblank validation, keeping the entire
-    pipeline lazy. No full `collect()` is performed — even very large
+    pipeline lazy. No full `collect()` is performed - even very large
     Parquet files that don't fit in RAM can be validated.
   - Tolerance columns (`__ok`), equality columns (`__eq`), and text
     preprocessing are computed via `dplyr::mutate()` on the Arrow side
